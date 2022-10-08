@@ -22,7 +22,7 @@ from ivadomed import utils as imed_utils
 from ivadomed import visualize as imed_visualize
 from ivadomed.loader import utils as imed_loader_utils
 from ivadomed.loader.balanced_sampler import BalancedSampler
-from ivadomed.keywords import ModelParamsKW, ConfigKW, BalanceSamplesKW, TrainingParamsKW, MetadataKW, WandbKW
+from ivadomed.keywords import ModelParamsKW, ConfigKW, BalanceSamplesKW, TrainingParamsKW, MetadataKW, WandbKW, BBSamplingKW
 
 cudnn.benchmark = True
 
@@ -79,7 +79,7 @@ def train(model_params, dataset_train, dataset_val, training_params, path_output
     sampler_train, shuffle_train = get_sampler(dataset_train, conditions,
                                                training_params[TrainingParamsKW.BALANCE_SAMPLES][BalanceSamplesKW.TYPE])
 
-    if training_params[TrainingParamsKW.BBSAMPLING]:
+    if training_params[TrainingParamsKW.BBSAMPLING][BBSamplingKW.APPLIED]:
         train_loader = [[{} for i in range(len(dataset_train[0]) // training_params[TrainingParamsKW.BATCH_SIZE])] for i
                         in range(len(dataset_train))]
         for dataloader in train_loader:
@@ -201,7 +201,7 @@ def train(model_params, dataset_train, dataset_val, training_params, path_output
         train_loss_total, train_dice_loss_total = 0.0, 0.0
         num_steps = 0
 
-        if training_params[TrainingParamsKW.BBSAMPLING]:
+        if training_params[TrainingParamsKW.BBSAMPLING][BBSamplingKW.APPLIED]:
             for i in range(1,(len(dataset_train[0]) // training_params[TrainingParamsKW.BATCH_SIZE]) + 1):
                 for idx, dataloader in enumerate(train_loader):
                     dataloader_iterator = iter(dataloader[0])
@@ -225,7 +225,6 @@ def train(model_params, dataset_train, dataset_val, training_params, path_output
                         preds = model(input_samples, metadata)
                     else:
                         preds = model(input_samples)
-
 
                     dataloader[i]["loss"] = loss_fct(preds, gt_samples)
 

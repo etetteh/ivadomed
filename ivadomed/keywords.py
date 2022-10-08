@@ -67,6 +67,10 @@ class SplitDatasetKW:
 
 
 @dataclass
+class BBSamplingKW:
+    APPLIED: str = "applied"
+
+@dataclass
 class DataTestingKW:
     DATA_TYPE: str = "data_type"
     DATA_VALUE: str = "data_value"
@@ -74,9 +78,9 @@ class DataTestingKW:
 
 @dataclass
 class TrainingParamsKW:
+    BBSAMPLING: str = "bbsampling"
     BALANCE_SAMPLES: str = "balance_samples"
     BATCH_SIZE: str = "batch_size"
-    BBSAMPLING: str = "bbsampling"
 
 
 @dataclass

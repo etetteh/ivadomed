@@ -14,7 +14,8 @@ from loguru import logger
 from sklearn.model_selection import train_test_split
 from torch._six import string_classes
 from ivadomed import utils as imed_utils
-from ivadomed.keywords import SplitDatasetKW, LoaderParamsKW, ROIParamsKW, ContrastParamsKW, TrainingParamsKW
+from ivadomed.keywords import SplitDatasetKW, LoaderParamsKW, ROIParamsKW, ContrastParamsKW, TrainingParamsKW, \
+    ConfigKW, BBSamplingKW
 import nibabel as nib
 import random
 
@@ -81,8 +82,8 @@ def split_dataset(df, split_method, data_testing, random_seed, train_frac=0.8, t
     if len(data_value) != 0:
         for value in data_value:
             if value not in df[data_type].values:
-                    logger.warning("No data_value '{}' was found in '{}'. Not taken into account "
-                                   "to split the dataset.".format(value, data_type))
+                logger.warning("No data_value '{}' was found in '{}'. Not taken into account "
+                               "to split the dataset.".format(value, data_type))
     X_test = df[df[data_type].isin(data_value)]['filename'].unique().tolist()
     X_remain = df[~df[data_type].isin(data_value)][split_method].unique().tolist()
 
@@ -98,12 +99,12 @@ def split_dataset(df, split_method, data_testing, random_seed, train_frac=0.8, t
     X_train, X_val = train_test_split(X_remain, train_size=train_frac_update, random_state=random_seed)
 
     # Print the real train, validation and test fractions after splitting
-    real_train_frac = len(X_train)/len(data)
-    real_valid_frac = len(X_val)/len(data)
+    real_train_frac = len(X_train) / len(data)
+    real_valid_frac = len(X_val) / len(data)
     real_test_frac = 1 - real_train_frac - real_valid_frac
     logger.warning("After splitting: train, validation and test fractions are respectively {}, {} and {}"
                    " of {}.".format(round(real_train_frac, 3), round(real_valid_frac, 3),
-                   round(real_test_frac, 3), split_method))
+                                    round(real_test_frac, 3), split_method))
 
     # Convert train and valid sets from list of "split_method" to list of "filename"
     X_train = df[df[split_method].isin(X_train)]['filename'].unique().tolist()
@@ -199,13 +200,14 @@ def get_subdatasets_subject_files_list(split_params, df, path_output, subject_se
     Returns:
         list, list list: Training, validation and testing filenames lists.
     """
-    if split_params[SplitDatasetKW.FNAME_SPLIT]:
+    # train_lst0, train_lst1, valid_lst, test_lst = [], [], [], []
+    if split_params[ConfigKW.SPLIT_DATASET][SplitDatasetKW.FNAME_SPLIT]:
         # Load subjects lists
-        old_split = joblib.load(split_params[SplitDatasetKW.FNAME_SPLIT])
+        old_split = joblib.load(split_params[ConfigKW.SPLIT_DATASET][SplitDatasetKW.FNAME_SPLIT])
         train_lst, valid_lst, test_lst = old_split['train'], old_split['valid'], old_split['test']
 
         # Backward compatibility for subject_file_lst containing participant_ids instead of filenames
-        if TrainingParamsKW.BBSAMPLING:
+        if split_params[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BBSAMPLING][BBSamplingKW.APPLIED]:
             df_subjects0 = df[df['filename'].isin(train_lst[0])]
             df_subjects1 = df[df['filename'].isin(train_lst[1])]
             if df_subjects0.empty:
@@ -231,16 +233,25 @@ def get_subdatasets_subject_files_list(split_params, df, path_output, subject_se
             test_lst = sorted(df_test['filename'].to_list())
     else:
         train_lst, valid_lst, test_lst = get_new_subject_file_split(df=df,
-                                                                    split_method=split_params[SplitDatasetKW.SPLIT_METHOD],
-                                                                    data_testing=split_params[SplitDatasetKW.DATA_TESTING],
-                                                                    random_seed=split_params[SplitDatasetKW.RANDOM_SEED],
-                                                                    train_frac=split_params[SplitDatasetKW.TRAIN_FRACTION],
-                                                                    test_frac=split_params[SplitDatasetKW.TEST_FRACTION],
+                                                                    split_method=split_params[ConfigKW.SPLIT_DATASET][
+                                                                        SplitDatasetKW.SPLIT_METHOD],
+                                                                    data_testing=split_params[ConfigKW.SPLIT_DATASET][
+                                                                        SplitDatasetKW.DATA_TESTING],
+                                                                    random_seed=split_params[ConfigKW.SPLIT_DATASET][
+                                                                        SplitDatasetKW.RANDOM_SEED],
+                                                                    train_frac=split_params[ConfigKW.SPLIT_DATASET][
+                                                                        SplitDatasetKW.TRAIN_FRACTION],
+                                                                    test_frac=split_params[ConfigKW.SPLIT_DATASET][
+                                                                        SplitDatasetKW.TEST_FRACTION],
                                                                     path_output=path_output,
-                                                                    balance=split_params[SplitDatasetKW.BALANCE]
-                                                                    if SplitDatasetKW.BALANCE in split_params else None,
+                                                                    balance=split_params[ConfigKW.SPLIT_DATASET][
+                                                                        SplitDatasetKW.BALANCE]
+                                                                    if SplitDatasetKW.BALANCE in split_params[
+                                                                        ConfigKW.SPLIT_DATASET] else None,
                                                                     subject_selection=subject_selection)
-    return (train_lst0, train_lst1, valid_lst, test_lst) if TrainingParamsKW.BBSAMPLING else (train_lst, valid_lst, test_lst)
+    return (train_lst0, train_lst1, valid_lst, test_lst) if \
+        split_params[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BBSAMPLING][BBSamplingKW.APPLIED] \
+        else (train_lst, valid_lst, test_lst)
 
 
 def imed_collate(batch):
@@ -492,6 +503,7 @@ def create_temp_directory() -> str:
     time_stamp = datetime.datetime.now().isoformat().replace(":", "")
     temp_folder_location = mkdtemp(prefix="ivadomed_", suffix=f"_{time_stamp}")
     return temp_folder_location
+
 
 def get_obj_size(obj) -> int:
     """

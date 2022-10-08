@@ -21,7 +21,7 @@ from ivadomed import inference as imed_inference
 from ivadomed.loader import utils as imed_loader_utils, loader as imed_loader, film as imed_film
 from ivadomed.keywords import ConfigKW, ModelParamsKW, LoaderParamsKW, ContrastParamsKW, BalanceSamplesKW, \
     TrainingParamsKW, ObjectDetectionParamsKW, UncertaintyKW, PostprocessingKW, BinarizeProdictionKW, MetricsKW, \
-    MetadataKW, OptionKW, SplitDatasetKW
+    MetadataKW, OptionKW, SplitDatasetKW, BBSamplingKW
 from loguru import logger
 from pathlib import Path
 
@@ -71,12 +71,12 @@ def get_parser():
                                     'for resume training. This training state is saved everytime a new best model is saved in the output directory specified with flag "--path-output"')
     optional_args.add_argument('--no-patch', dest="no_patch", action='store_true', required=False,
                                help='2D patches are not used while segmenting with models trained with patches '
-                               '(command "--segment" only). The "--no-patch" argument supersedes the "--overlap-2D" argument. '
-                               ' This option may not be suitable with large images depending on computer RAM capacity.')
+                                    '(command "--segment" only). The "--no-patch" argument supersedes the "--overlap-2D" argument. '
+                                    ' This option may not be suitable with large images depending on computer RAM capacity.')
     optional_args.add_argument('--overlap-2d', dest="overlap_2d", required=False, type=int, nargs="+",
-                                help='Custom overlap for 2D patches while segmenting (command "--segment" only). '
-                                'Example: "--overlap-2d 48 48" for an overlap of 48 pixels between patches in X and Y respectively. '
-                                'Default model overlap is used otherwise.')
+                               help='Custom overlap for 2D patches while segmenting (command "--segment" only). '
+                                    'Example: "--overlap-2d 48 48" for an overlap of 48 pixels between patches in X and Y respectively. '
+                                    'Default model overlap is used otherwise.')
     optional_args.add_argument('-h', '--help', action='help', default=argparse.SUPPRESS,
                                help='Shows function documentation.')
 
@@ -148,7 +148,7 @@ def set_loader_params(context, is_train):
         loader_params[LoaderParamsKW.CONTRAST_PARAMS][ContrastParamsKW.CONTRAST_LST] = \
             loader_params[LoaderParamsKW.CONTRAST_PARAMS][ContrastParamsKW.TRAINING_VALIDATION]
     else:
-        loader_params[LoaderParamsKW.CONTRAST_PARAMS][ContrastParamsKW.CONTRAST_LST] =\
+        loader_params[LoaderParamsKW.CONTRAST_PARAMS][ContrastParamsKW.CONTRAST_LST] = \
             loader_params[LoaderParamsKW.CONTRAST_PARAMS][ContrastParamsKW.TESTING]
     if ConfigKW.FILMED_UNET in context and context[ConfigKW.FILMED_UNET][ModelParamsKW.APPLIED]:
         loader_params.update({LoaderParamsKW.METADATA_TYPE: context[ConfigKW.FILMED_UNET][ModelParamsKW.METADATA]})
@@ -157,7 +157,8 @@ def set_loader_params(context, is_train):
     if context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BALANCE_SAMPLES][BalanceSamplesKW.APPLIED] and \
             context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BALANCE_SAMPLES][BalanceSamplesKW.TYPE] != 'gt':
         loader_params.update({LoaderParamsKW.METADATA_TYPE:
-                                  context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BALANCE_SAMPLES][BalanceSamplesKW.TYPE]})
+                                  context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BALANCE_SAMPLES][
+                                      BalanceSamplesKW.TYPE]})
     return loader_params
 
 
@@ -176,7 +177,7 @@ def set_model_params(context, loader_params):
             model_params.update(context[model_context_list[i]])
     elif len(model_context_list) > 1:
         logger.error(f'ERROR: Several models are selected in the configuration file: {model_context_list}.'
-              'Please select only one (i.e. only one where: "applied": true).')
+                     'Please select only one (i.e. only one where: "applied": true).')
         exit()
 
     model_params[ModelParamsKW.IS_2D] = False if ConfigKW.MODIFIED_3D_UNET in model_params[ModelParamsKW.NAME] \
@@ -266,7 +267,8 @@ def run_segment_command(context, model_params, no_patch, overlap_2d):
                 # if subj_id has not been seen yet
                 fname_img = []
                 provided_contrasts = []
-                contrasts = context[ConfigKW.LOADER_PARAMETERS][LoaderParamsKW.CONTRAST_PARAMS][ContrastParamsKW.TESTING]
+                contrasts = context[ConfigKW.LOADER_PARAMETERS][LoaderParamsKW.CONTRAST_PARAMS][
+                    ContrastParamsKW.TESTING]
                 # Keep contrast order
                 for c in contrasts:
                     df_tmp = bids_df.df[
@@ -375,7 +377,7 @@ def run_command(context, n_gif=0, thr_increment=None, resume_training=False, no_
     cuda_available, device = imed_utils.define_device(context[ConfigKW.GPU_IDS][0])
 
     # BACKWARDS COMPATIBILITY: If bids_path is string, assign to list - Do this here so it propagates to all functions
-    context[ConfigKW.LOADER_PARAMETERS][LoaderParamsKW.PATH_DATA] =\
+    context[ConfigKW.LOADER_PARAMETERS][LoaderParamsKW.PATH_DATA] = \
         imed_utils.format_path_data(context[ConfigKW.LOADER_PARAMETERS][LoaderParamsKW.PATH_DATA])
 
     # Loader params
@@ -396,24 +398,26 @@ def run_command(context, n_gif=0, thr_increment=None, resume_training=False, no_
     # Indexing of derivatives is True for commands train and test
     # split_method is used for removing unused subject files in bids_df for commands train and test
     bids_df = BidsDataframe(loader_params, path_output, derivatives=True,
-        split_method=context.get(ConfigKW.SPLIT_DATASET).get(SplitDatasetKW.SPLIT_METHOD))
+                            split_method=context.get(ConfigKW.SPLIT_DATASET).get(SplitDatasetKW.SPLIT_METHOD))
 
     # Get subject filenames lists. "segment" command uses all participants of data path, hence no need to split
-    if TrainingParamsKW.BBSAMPLING:
-        train_lst0, train_lst1, valid_lst, test_lst = imed_loader_utils.get_subdatasets_subject_files_list(context[ConfigKW.SPLIT_DATASET],
-                                                                                          bids_df.df,
-                                                                                          path_output,
-                                                                                          context.get(ConfigKW.LOADER_PARAMETERS).get(
-                                                                                              LoaderParamsKW.SUBJECT_SELECTION))
+    if context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BBSAMPLING][BBSamplingKW.APPLIED]:
+        train_lst0, train_lst1, valid_lst, test_lst = imed_loader_utils.get_subdatasets_subject_files_list(
+            context,
+            bids_df.df,
+            path_output,
+            context.get(ConfigKW.LOADER_PARAMETERS).get(
+                LoaderParamsKW.SUBJECT_SELECTION))
     else:
-        train_lst, valid_lst, test_lst = imed_loader_utils.get_subdatasets_subject_files_list(context[ConfigKW.SPLIT_DATASET],
-                                                                                          bids_df.df,
-                                                                                          path_output,
-                                                                                          context.get(ConfigKW.LOADER_PARAMETERS).get(
-                                                                                              LoaderParamsKW.SUBJECT_SELECTION))
+        train_lst, valid_lst, test_lst = imed_loader_utils.get_subdatasets_subject_files_list(
+            context,
+            bids_df.df,
+            path_output,
+            context.get(ConfigKW.LOADER_PARAMETERS).get(
+                LoaderParamsKW.SUBJECT_SELECTION))
 
     # Generating sha256 for the training files
-    if TrainingParamsKW.BBSAMPLING:
+    if context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BBSAMPLING][BBSamplingKW.APPLIED]:
         imed_utils.generate_sha_256(context, bids_df.df, train_lst0)
         imed_utils.generate_sha_256(context, bids_df.df, train_lst1)
     else:
@@ -448,15 +452,17 @@ def run_command(context, n_gif=0, thr_increment=None, resume_training=False, no_
                                'validation')
 
         # Get Training dataset
-        if TrainingParamsKW.BBSAMPLING:
+        if context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BBSAMPLING][BBSamplingKW.APPLIED]:
             ds_train0 = get_dataset(bids_df, loader_params, train_lst0, transform_train_params, cuda_available, device,
-                               'training')
+                                    'training')
             ds_train1 = get_dataset(bids_df, loader_params, train_lst1, transform_train_params, cuda_available, device,
-                               'training')
+                                    'training')
         else:
             ds_train = get_dataset(bids_df, loader_params, train_lst, transform_train_params, cuda_available, device,
-                               'training')
-        metric_fns = imed_metrics.get_metric_fns(ds_train0.task) if TrainingParamsKW.BBSAMPLING else imed_metrics.get_metric_fns(ds_train0.task)
+                                   'training')
+        metric_fns = imed_metrics.get_metric_fns(ds_train0.task) \
+            if context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BBSAMPLING][BBSamplingKW.APPLIED] \
+            else imed_metrics.get_metric_fns(ds_train.task)
 
         # If FiLM, normalize data
         if ModelParamsKW.FILM_LAYERS in model_params and any(model_params[ModelParamsKW.FILM_LAYERS]):
@@ -466,14 +472,17 @@ def run_command(context, n_gif=0, thr_increment=None, resume_training=False, no_
             train_onehotencoder = None
 
         # Model directory
-        create_path_model(context, model_params, ds_train0 if TrainingParamsKW.BBSAMPLING else ds_train, path_output, train_onehotencoder)
+        create_path_model(context, model_params, ds_train0
+        if context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BBSAMPLING][BBSamplingKW.APPLIED]
+        else ds_train, path_output, train_onehotencoder)
 
         save_config_file(context, path_output)
 
         # RUN TRAINING
         best_training_dice, best_training_loss, best_validation_dice, best_validation_loss = imed_training.train(
             model_params=model_params,
-            dataset_train=(ds_train0, ds_train1) if TrainingParamsKW.BBSAMPLING else ds_train,
+            dataset_train=(ds_train0, ds_train1) if
+            context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BBSAMPLING][BBSamplingKW.APPLIED] else ds_train,
             dataset_val=ds_valid,
             training_params=context[ConfigKW.TRAINING_PARAMETERS],
             wandb_params=context.get(ConfigKW.WANDB),
@@ -493,14 +502,14 @@ def run_command(context, n_gif=0, thr_increment=None, resume_training=False, no_
                                    'validation')
 
         # Get Training dataset with no Data Augmentation
-        if TrainingParamsKW.BBSAMPLING:
+        if context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BBSAMPLING][BBSamplingKW.APPLIED]:
             ds_train0 = get_dataset(bids_df, loader_params, train_lst0, transform_valid_params, cuda_available, device,
-                               'training')
+                                    'training')
             ds_train1 = get_dataset(bids_df, loader_params, train_lst1, transform_valid_params, cuda_available, device,
-                               'training')
+                                    'training')
         else:
             ds_train = get_dataset(bids_df, loader_params, train_lst, transform_valid_params, cuda_available, device,
-                               'training')
+                                   'training')
 
         # Choice of optimisation metric
         if model_params[ModelParamsKW.NAME] in imed_utils.CLASSIFIER_LIST:
@@ -513,7 +522,10 @@ def run_command(context, n_gif=0, thr_increment=None, resume_training=False, no_
 
         # Run analysis
         thr = imed_testing.threshold_analysis(model_path=str(model_path),
-                                              ds_lst=[ds_train0, ds_train1, ds_valid] if TrainingParamsKW.BBSAMPLING else [ds_train, ds_valid],
+                                              ds_lst=[ds_train0, ds_train1, ds_valid] if
+                                              context[ConfigKW.TRAINING_PARAMETERS][TrainingParamsKW.BBSAMPLING][
+                                                  BBSamplingKW.APPLIED]
+                                              else [ds_train, ds_valid],
                                               model_params=model_params,
                                               testing_params=testing_params,
                                               metric=metric,
