@@ -60,14 +60,14 @@ def train(model_params, dataset_train, dataset_val, training_params, path_output
 
     if wandb_tracking:
         # Collect all hyperparameters into a dictionary
-        cfg = { **training_params, **model_params}
+        cfg = {**training_params, **model_params}
 
         # Get the actual project, group, and run names if they exist, else choose the temporary names as default
         project_name = wandb_params.get(WandbKW.PROJECT_NAME, "temp_project")
         group_name = wandb_params.get(WandbKW.GROUP_NAME, "temp_group")
         run_name = wandb_params.get(WandbKW.RUN_NAME, "temp_run")
 
-        if project_name == "temp_project" or group_name == "temp_group" or run_name == "temp_run":     
+        if project_name == "temp_project" or group_name == "temp_group" or run_name == "temp_run":
             logger.info("{PROJECT/GROUP/RUN} name not found, initializing as {'temp_project'/'temp_group'/'temp_run'}")
 
         # Initialize WandB with metrics and hyperparameters
@@ -79,10 +79,24 @@ def train(model_params, dataset_train, dataset_val, training_params, path_output
     sampler_train, shuffle_train = get_sampler(dataset_train, conditions,
                                                training_params[TrainingParamsKW.BALANCE_SAMPLES][BalanceSamplesKW.TYPE])
 
-    train_loader = DataLoader(dataset_train, batch_size=training_params[TrainingParamsKW.BATCH_SIZE],
-                              shuffle=shuffle_train, pin_memory=True, sampler=sampler_train,
-                              collate_fn=imed_loader_utils.imed_collate,
-                              num_workers=0)
+    if training_params[TrainingParamsKW.BBSAMPLING]:
+        train_loader = [[{} for i in range(len(dataset_train[0]) // training_params[TrainingParamsKW.BATCH_SIZE])] for i
+                        in range(len(dataset_train))]
+        for dataloader in train_loader:
+            for data in dataset_train:
+                if train_loader.index(dataloader) == dataset_train.index(data):
+                    tr_l = DataLoader(data, batch_size=training_params[TrainingParamsKW.BATCH_SIZE],
+                                      shuffle=shuffle_train, pin_memory=True, sampler=sampler_train,
+                                      collate_fn=imed_loader_utils.imed_collate,
+                                      num_workers=0
+                                      )
+                    dataloader.insert(0, tr_l)
+
+    else:
+        train_loader = DataLoader(dataset_train, batch_size=training_params[TrainingParamsKW.BATCH_SIZE],
+                                  shuffle=shuffle_train, pin_memory=True, sampler=sampler_train,
+                                  collate_fn=imed_loader_utils.imed_collate,
+                                  num_workers=0)
 
     gif_dict = {"image_path": [], "slice_id": [], "gif": []}
     if dataset_val:
@@ -186,45 +200,103 @@ def train(model_params, dataset_train, dataset_val, training_params, path_output
         model.train()
         train_loss_total, train_dice_loss_total = 0.0, 0.0
         num_steps = 0
-        for i, batch in enumerate(train_loader):
-            # GET SAMPLES
-            if model_params[ModelParamsKW.NAME] == ConfigKW.HEMIS_UNET:
-                input_samples = imed_utils.cuda(imed_utils.unstack_tensors(batch["input"]), cuda_available)
-            else:
-                input_samples = imed_utils.cuda(batch["input"], cuda_available)
-            gt_samples = imed_utils.cuda(batch["gt"], cuda_available, non_blocking=True)
 
-            # MIXUP
-            if training_params["mixup_alpha"]:
-                input_samples, gt_samples = imed_mixup.mixup(input_samples, gt_samples, training_params["mixup_alpha"],
+        if training_params[TrainingParamsKW.BBSAMPLING]:
+            for i in range(1,(len(dataset_train[0]) // training_params[TrainingParamsKW.BATCH_SIZE]) + 1):
+                for idx, dataloader in enumerate(train_loader):
+                    dataloader_iterator = iter(dataloader[0])
+                    batch = next(dataloader_iterator)
+                    # GET SAMPLES
+                    if model_params[ModelParamsKW.NAME] == ConfigKW.HEMIS_UNET:
+                         input_samples = imed_utils.cuda(imed_utils.unstack_tensors(batch["input"]), cuda_available)
+                    else:
+                        input_samples = imed_utils.cuda(batch["input"], cuda_available)
+                    gt_samples = imed_utils.cuda(batch["gt"], cuda_available, non_blocking=True)
+
+                    # MIXUP
+                    if training_params["mixup_alpha"]:
+                        input_samples, gt_samples = imed_mixup.mixup(input_samples, gt_samples, training_params["mixup_alpha"],
+                                                         debugging and epoch == 1, path_output)
+
+                    # RUN MODEL
+                    if model_params[ModelParamsKW.NAME] == ConfigKW.HEMIS_UNET or \
+                        (ModelParamsKW.FILM_LAYERS in model_params and any(model_params[ModelParamsKW.FILM_LAYERS])):
+                        metadata = get_metadata(batch[MetadataKW.INPUT_METADATA], model_params)
+                        preds = model(input_samples, metadata)
+                    else:
+                        preds = model(input_samples)
+
+
+                    dataloader[i]["loss"] = loss_fct(preds, gt_samples)
+
+                # LOSS
+                train_nll = torch.stack([train_loader[0][i]["loss"], train_loader[1][i]["loss"]]).mean()
+
+                weight_norm = torch.tensor(0.).to(device)
+                for w in model.parameters():
+                    weight_norm += w.norm().pow(2)
+
+                loss1 = train_loader[0][i]["loss"]
+                loss2 = train_loader[1][i]["loss"]
+                loss = 0.0
+                loss += (loss1 + loss2)
+                loss += 1e-5 * weight_norm
+
+                train_loss_total += train_nll.detach().cpu().numpy()
+                train_dice_loss_total += loss_dice_fct(preds, gt_samples).item()
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                if step_scheduler_batch:
+                    scheduler.step()
+                num_steps += 1
+
+                 # Save image at every 50th step if debugging is true
+                if i % 50 == 0 and debugging:
+                    imed_visualize.save_img(writer, epoch, "Train", input_samples, gt_samples, preds,
+                                        wandb_tracking=wandb_tracking,
+                                        is_three_dim=not model_params[ModelParamsKW.IS_2D])
+        else:
+            for i, batch in enumerate(train_loader):
+                # GET SAMPLES
+                if model_params[ModelParamsKW.NAME] == ConfigKW.HEMIS_UNET:
+                    input_samples = imed_utils.cuda(imed_utils.unstack_tensors(batch["input"]), cuda_available)
+                else:
+                    input_samples = imed_utils.cuda(batch["input"], cuda_available)
+                gt_samples = imed_utils.cuda(batch["gt"], cuda_available, non_blocking=True)
+
+                # MIXUP
+                if training_params["mixup_alpha"]:
+                    input_samples, gt_samples = imed_mixup.mixup(input_samples, gt_samples, training_params["mixup_alpha"],
                                                              debugging and epoch == 1, path_output)
 
-            # RUN MODEL
-            if model_params[ModelParamsKW.NAME] == ConfigKW.HEMIS_UNET or \
+                # RUN MODEL
+                if model_params[ModelParamsKW.NAME] == ConfigKW.HEMIS_UNET or \
                     (ModelParamsKW.FILM_LAYERS in model_params and any(model_params[ModelParamsKW.FILM_LAYERS])):
-                metadata = get_metadata(batch[MetadataKW.INPUT_METADATA], model_params)
-                preds = model(input_samples, metadata)
-            else:
-                preds = model(input_samples)
+                    metadata = get_metadata(batch[MetadataKW.INPUT_METADATA], model_params)
+                    preds = model(input_samples, metadata)
+                else:
+                    preds = model(input_samples)
 
-            # LOSS
-            loss = loss_fct(preds, gt_samples)
-            train_loss_total += loss.item()
-            train_dice_loss_total += loss_dice_fct(preds, gt_samples).item()
+                # LOSS
+                loss = loss_fct(preds, gt_samples)
+                train_loss_total += loss.item()
+                train_dice_loss_total += loss_dice_fct(preds, gt_samples).item()
 
-            # UPDATE OPTIMIZER
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            if step_scheduler_batch:
-                scheduler.step()
-            num_steps += 1
+                # UPDATE OPTIMIZER
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                if step_scheduler_batch:
+                    scheduler.step()
+                num_steps += 1
 
-            # Save image at every 50th step if debugging is true
-            if i%50 == 0 and debugging:
-                imed_visualize.save_img(writer, epoch, "Train", input_samples, gt_samples, preds,
-                                                wandb_tracking=wandb_tracking,
-                                                is_three_dim=not model_params[ModelParamsKW.IS_2D])
+                # Save image at every 50th step if debugging is true
+                if i % 50 == 0 and debugging:
+                    imed_visualize.save_img(writer, epoch, "Train", input_samples, gt_samples, preds,
+                                        wandb_tracking=wandb_tracking,
+                                        is_three_dim=not model_params[ModelParamsKW.IS_2D])
 
         if not step_scheduler_batch:
             scheduler.step()
@@ -261,7 +333,8 @@ def train(model_params, dataset_train, dataset_val, training_params, path_output
 
                     # RUN MODEL
                     if model_params[ModelParamsKW.NAME] == ConfigKW.HEMIS_UNET or \
-                            (ModelParamsKW.FILM_LAYERS in model_params and any(model_params[ModelParamsKW.FILM_LAYERS])):
+                            (ModelParamsKW.FILM_LAYERS in model_params and any(
+                                model_params[ModelParamsKW.FILM_LAYERS])):
                         metadata = get_metadata(batch[MetadataKW.INPUT_METADATA], model_params)
                         preds = model(input_samples, metadata)
                     else:
@@ -290,9 +363,9 @@ def train(model_params, dataset_train, dataset_val, training_params, path_output
                 metric_mgr(preds_npy, gt_npy)
 
                 # Save image at every 10th step if debugging is true
-                if i%50 == 0 and debugging:
+                if i % 50 == 0 and debugging:
                     imed_visualize.save_img(writer, epoch, "Validation", input_samples, gt_samples, preds,
-                                            wandb_tracking=wandb_tracking, 
+                                            wandb_tracking=wandb_tracking,
                                             is_three_dim=not model_params[ModelParamsKW.IS_2D])
 
             # METRICS COMPUTATION FOR CURRENT EPOCH
@@ -395,8 +468,8 @@ def train(model_params, dataset_train, dataset_val, training_params, path_output
     final_time = time.time()
     duration_time = final_time - begin_time
     logger.info('begin ' + time.strftime('%H:%M:%S', time.localtime(begin_time)) + "| End " +
-          time.strftime('%H:%M:%S', time.localtime(final_time)) +
-          "| duration " + str(datetime.timedelta(seconds=duration_time)))
+                time.strftime('%H:%M:%S', time.localtime(final_time)) +
+                "| duration " + str(datetime.timedelta(seconds=duration_time)))
 
     return best_training_dice, best_training_loss, best_validation_dice, best_validation_loss
 

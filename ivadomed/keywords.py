@@ -76,6 +76,7 @@ class DataTestingKW:
 class TrainingParamsKW:
     BALANCE_SAMPLES: str = "balance_samples"
     BATCH_SIZE: str = "batch_size"
+    BBSAMPLING: str = "bbsampling"
 
 
 @dataclass

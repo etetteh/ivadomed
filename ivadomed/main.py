@@ -399,14 +399,25 @@ def run_command(context, n_gif=0, thr_increment=None, resume_training=False, no_
         split_method=context.get(ConfigKW.SPLIT_DATASET).get(SplitDatasetKW.SPLIT_METHOD))
 
     # Get subject filenames lists. "segment" command uses all participants of data path, hence no need to split
-    train_lst, valid_lst, test_lst = imed_loader_utils.get_subdatasets_subject_files_list(context[ConfigKW.SPLIT_DATASET],
+    if TrainingParamsKW.BBSAMPLING:
+        train_lst0, train_lst1, valid_lst, test_lst = imed_loader_utils.get_subdatasets_subject_files_list(context[ConfigKW.SPLIT_DATASET],
+                                                                                          bids_df.df,
+                                                                                          path_output,
+                                                                                          context.get(ConfigKW.LOADER_PARAMETERS).get(
+                                                                                              LoaderParamsKW.SUBJECT_SELECTION))
+    else:
+        train_lst, valid_lst, test_lst = imed_loader_utils.get_subdatasets_subject_files_list(context[ConfigKW.SPLIT_DATASET],
                                                                                           bids_df.df,
                                                                                           path_output,
                                                                                           context.get(ConfigKW.LOADER_PARAMETERS).get(
                                                                                               LoaderParamsKW.SUBJECT_SELECTION))
 
     # Generating sha256 for the training files
-    imed_utils.generate_sha_256(context, bids_df.df, train_lst)
+    if TrainingParamsKW.BBSAMPLING:
+        imed_utils.generate_sha_256(context, bids_df.df, train_lst0)
+        imed_utils.generate_sha_256(context, bids_df.df, train_lst1)
+    else:
+        imed_utils.generate_sha_256(context, bids_df.df, train_lst)
 
     # TESTING PARAMS
     # Aleatoric uncertainty
@@ -437,9 +448,15 @@ def run_command(context, n_gif=0, thr_increment=None, resume_training=False, no_
                                'validation')
 
         # Get Training dataset
-        ds_train = get_dataset(bids_df, loader_params, train_lst, transform_train_params, cuda_available, device,
+        if TrainingParamsKW.BBSAMPLING:
+            ds_train0 = get_dataset(bids_df, loader_params, train_lst0, transform_train_params, cuda_available, device,
                                'training')
-        metric_fns = imed_metrics.get_metric_fns(ds_train.task)
+            ds_train1 = get_dataset(bids_df, loader_params, train_lst1, transform_train_params, cuda_available, device,
+                               'training')
+        else:
+            ds_train = get_dataset(bids_df, loader_params, train_lst, transform_train_params, cuda_available, device,
+                               'training')
+        metric_fns = imed_metrics.get_metric_fns(ds_train0.task) if TrainingParamsKW.BBSAMPLING else imed_metrics.get_metric_fns(ds_train0.task)
 
         # If FiLM, normalize data
         if ModelParamsKW.FILM_LAYERS in model_params and any(model_params[ModelParamsKW.FILM_LAYERS]):
@@ -449,14 +466,14 @@ def run_command(context, n_gif=0, thr_increment=None, resume_training=False, no_
             train_onehotencoder = None
 
         # Model directory
-        create_path_model(context, model_params, ds_train, path_output, train_onehotencoder)
+        create_path_model(context, model_params, ds_train0 if TrainingParamsKW.BBSAMPLING else ds_train, path_output, train_onehotencoder)
 
         save_config_file(context, path_output)
 
         # RUN TRAINING
         best_training_dice, best_training_loss, best_validation_dice, best_validation_loss = imed_training.train(
             model_params=model_params,
-            dataset_train=ds_train,
+            dataset_train=(ds_train0, ds_train1) if TrainingParamsKW.BBSAMPLING else ds_train,
             dataset_val=ds_valid,
             training_params=context[ConfigKW.TRAINING_PARAMETERS],
             wandb_params=context.get(ConfigKW.WANDB),
@@ -476,7 +493,13 @@ def run_command(context, n_gif=0, thr_increment=None, resume_training=False, no_
                                    'validation')
 
         # Get Training dataset with no Data Augmentation
-        ds_train = get_dataset(bids_df, loader_params, train_lst, transform_valid_params, cuda_available, device,
+        if TrainingParamsKW.BBSAMPLING:
+            ds_train0 = get_dataset(bids_df, loader_params, train_lst0, transform_valid_params, cuda_available, device,
+                               'training')
+            ds_train1 = get_dataset(bids_df, loader_params, train_lst1, transform_valid_params, cuda_available, device,
+                               'training')
+        else:
+            ds_train = get_dataset(bids_df, loader_params, train_lst, transform_valid_params, cuda_available, device,
                                'training')
 
         # Choice of optimisation metric
@@ -490,7 +513,7 @@ def run_command(context, n_gif=0, thr_increment=None, resume_training=False, no_
 
         # Run analysis
         thr = imed_testing.threshold_analysis(model_path=str(model_path),
-                                              ds_lst=[ds_train, ds_valid],
+                                              ds_lst=[ds_train0, ds_train1, ds_valid] if TrainingParamsKW.BBSAMPLING else [ds_train, ds_valid],
                                               model_params=model_params,
                                               testing_params=testing_params,
                                               metric=metric,

@@ -14,7 +14,7 @@ from loguru import logger
 from sklearn.model_selection import train_test_split
 from torch._six import string_classes
 from ivadomed import utils as imed_utils
-from ivadomed.keywords import SplitDatasetKW, LoaderParamsKW, ROIParamsKW, ContrastParamsKW
+from ivadomed.keywords import SplitDatasetKW, LoaderParamsKW, ROIParamsKW, ContrastParamsKW, TrainingParamsKW
 import nibabel as nib
 import random
 
@@ -205,10 +205,20 @@ def get_subdatasets_subject_files_list(split_params, df, path_output, subject_se
         train_lst, valid_lst, test_lst = old_split['train'], old_split['valid'], old_split['test']
 
         # Backward compatibility for subject_file_lst containing participant_ids instead of filenames
-        df_subjects = df[df['filename'].isin(train_lst)]
-        if df_subjects.empty:
-            df_train = df[df['participant_id'].isin(train_lst)]
-            train_lst = sorted(df_train['filename'].to_list())
+        if TrainingParamsKW.BBSAMPLING:
+            df_subjects0 = df[df['filename'].isin(train_lst[0])]
+            df_subjects1 = df[df['filename'].isin(train_lst[1])]
+            if df_subjects0.empty:
+                df_train0 = df[df['participant_id'].isin(train_lst[0])]
+                train_lst0 = sorted(df_train0['filename'].to_list())
+            if df_subjects1.empty:
+                df_train1 = df[df['participant_id'].isin(train_lst[1])]
+                train_lst1 = sorted(df_train1['filename'].to_list())
+        else:
+            df_subjects = df[df['filename'].isin(train_lst)]
+            if df_subjects.empty:
+                df_train = df[df['participant_id'].isin(train_lst)]
+                train_lst = sorted(df_train['filename'].to_list())
 
         df_subjects = df[df['filename'].isin(valid_lst)]
         if df_subjects.empty:
@@ -230,7 +240,7 @@ def get_subdatasets_subject_files_list(split_params, df, path_output, subject_se
                                                                     balance=split_params[SplitDatasetKW.BALANCE]
                                                                     if SplitDatasetKW.BALANCE in split_params else None,
                                                                     subject_selection=subject_selection)
-    return train_lst, valid_lst, test_lst
+    return (train_lst0, train_lst1, valid_lst, test_lst) if TrainingParamsKW.BBSAMPLING else (train_lst, valid_lst, test_lst)
 
 
 def imed_collate(batch):
@@ -410,9 +420,9 @@ def get_file_extension(filename):
 
 
 def update_filename_to_nifti(filename):
-    """ 
+    """
     Update filename extension to 'nii.gz' if not a NifTI file.
-    
+
     This function is used to help make non-NifTI files (e.g. PNG/TIF/JPG)
     compatible with NifTI-only pipelines. The expectation is that a NifTI
     version of the file has been created alongside the original file, which
